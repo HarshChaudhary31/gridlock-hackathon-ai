@@ -1,0 +1,45 @@
+version: "3.9"
+
+services:
+  backend:
+    build: .
+    container_name: traffic-ai-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./reports:/app/reports
+      - ./weights:/app/weights
+      - ./logs:/app/logs
+      - ./data:/app/data
+    environment:
+      - DEVICE=cpu
+      - DATABASE_URL=sqlite+aiosqlite:///./traffic_ai.db
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+    command: python main.py backend --host 0.0.0.0 --api-port 8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  frontend:
+    build: .
+    container_name: traffic-ai-frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+    command: >
+      streamlit run frontend/app.py
+      --server.port 8501
+      --server.address 0.0.0.0
+      --server.headless true
+
+volumes:
+  traffic_data:
