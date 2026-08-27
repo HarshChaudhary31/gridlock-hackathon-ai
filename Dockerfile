@@ -23,6 +23,7 @@ RUN mkdir -p uploads outputs reports weights logs data/sample
 
 ENV PYTHONPATH=/app
 ENV DEVICE=cpu
+ENV YOLO_CONFIG_DIR=/tmp/Ultralytics
 
 EXPOSE 8000 8501
 
