@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Smart Traffic Monitoring API",
-    description="AI-powered traffic monitoring for Bengaluru - Flipkart Gridlock Hackathon 2.0",
+    description="AI-powered traffic monitoring and mobility intelligence platform",
     version="1.0.0",
     lifespan=lifespan,
 )

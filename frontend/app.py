@@ -1,9 +1,10 @@
 """
 Smart Traffic Monitoring Dashboard - Streamlit Frontend
-Flipkart Gridlock Hackathon 2.0 | Bengaluru Mobility Intelligence
+Traffic AI | Smart Traffic Monitoring
 """
 
 import io
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -17,13 +18,13 @@ from PIL import Image
 
 # Page config
 st.set_page_config(
-    page_title="Bengaluru Traffic AI",
+    page_title=" Traffic AI",
     page_icon="🚦",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-API_URL = st.sidebar.text_input("Backend API URL", "http://localhost:8000/api/v1")
+API_URL = f"{os.getenv('BACKEND_URL', 'http://localhost:8000').rstrip('/')}/api/v1"
 
 # Dark theme CSS
 st.markdown(
@@ -84,7 +85,7 @@ def congestion_class(level: str) -> str:
         "Low Traffic": "congestion-low",
         "Medium Traffic": "congestion-medium",
         "Heavy Traffic": "congestion-heavy",
-        "Gridlock": "congestion-gridlock",
+        "traffic ai ": "congestion-gridlock",
     }
     return m.get(level, "congestion-low")
 
@@ -97,8 +98,6 @@ page = st.sidebar.radio(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Flipkart Gridlock Hackathon 2.0**")
-st.sidebar.markdown("Bengaluru Smart Mobility")
 
 # Session state
 if "session_id" not in st.session_state:
@@ -371,9 +370,7 @@ else:
     st.header("About Smart Traffic AI")
     st.markdown(
         """
-        ### Bengaluru Mobility Intelligence System
-
-        **Flipkart Gridlock Hackathon 2.0** — Production-ready AI traffic monitoring platform.
+        **Traffic AI** — AI-powered traffic monitoring and mobility intelligence platform.
 
         #### Architecture
         ```
