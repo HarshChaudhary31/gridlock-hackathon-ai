@@ -27,4 +27,4 @@ ENV YOLO_CONFIG_DIR=/tmp/Ultralytics
 
 EXPOSE 8000 8501
 
-CMD ["python", "main.py", "backend", "--host", "0.0.0.0", "--api-port", "8000"]
+CMD ["sh", "-c", "python main.py backend --host 0.0.0.0 --api-port ${PORT:-8000}"]
