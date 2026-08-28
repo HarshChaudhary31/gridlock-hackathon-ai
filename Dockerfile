@@ -25,7 +25,6 @@ ENV PYTHONPATH=/app
 ENV DEVICE=cpu
 ENV YOLO_CONFIG_DIR=/tmp/Ultralytics
 
-RUN python -c "from ultralytics import YOLO; import shutil; YOLO('yolov8n.pt'); shutil.copy('yolov8n.pt', '/app/weights/yolov8n.pt')"
 EXPOSE 8000
 
 CMD ["sh", "-c", "python main.py backend --host 0.0.0.0 --api-port ${PORT:-8000}"]
