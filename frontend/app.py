@@ -24,7 +24,19 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-API_URL = f"{os.getenv('BACKEND_URL', 'http://localhost:8000').rstrip('/')}/api/v1"
+def _api_origin() -> str:
+    """Backend origin only (no /api path). Streamlit uses BACKEND_URL; Vite-style env is also accepted."""
+    raw = (
+        os.getenv("VITE_API_BASE_URL")
+        or os.getenv("API_BASE_URL")
+        or os.getenv("BACKEND_URL")
+        or "http://localhost:8000"
+    )
+    return raw.rstrip("/")
+
+
+API_ORIGIN = _api_origin()
+API_URL = f"{API_ORIGIN}/api/v1"
 
 # Dark theme CSS
 st.markdown(
@@ -57,27 +69,245 @@ st.markdown(
 )
 
 
-def api_get(path: str):
+def _http_error_message(exc: Exception) -> str:
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        r = exc.response
+        body = (r.text or "").strip()
+        if len(body) > 800:
+            body = body[:800] + "…"
+        extra = f" — {body}" if body else ""
+        if r.status_code == 502:
+            return (
+                f"HTTP 502 Bad Gateway from {r.url}. "
+                "The backend proxy failed (timeout, crash, or out-of-memory during processing). "
+                "Try a shorter clip and keep max_frames around 150. Do not treat this as empty detections."
+                f"{extra}"
+            )
+        return f"HTTP {r.status_code} {r.reason} from {r.url}{extra}"
+    if isinstance(exc, requests.Timeout):
+        return f"Request timed out talking to {API_URL}. The backend may still be processing."
+    return str(exc)
+
+
+def api_get(path: str, timeout: int = 15, show_error: bool = True):
     try:
-        r = requests.get(f"{API_URL}{path}", timeout=10)
+        r = requests.get(f"{API_URL}{path}", timeout=timeout)
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        st.error(f"API Error: {e}")
+        if os.getenv("TRAFFIC_AI_DEBUG") or os.getenv("STREAMLIT_DEBUG"):
+            st.exception(e)
+        elif show_error:
+            st.error(f"API Error: {_http_error_message(e)}")
         return None
 
 
-def api_post(path: str, files=None, json=None):
+def api_post(path: str, files=None, json=None, params=None, timeout: int = 120):
     try:
-        if files:
-            r = requests.post(f"{API_URL}{path}", files=files, timeout=60)
+        r = requests.post(f"{API_URL}{path}", files=files, json=json, params=params, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        st.error(f"API Error: {_http_error_message(e)}")
+        return None
+
+
+def _as_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value) -> list:
+    return value if isinstance(value, list) else []
+
+
+def normalize_results(status: dict | None, live: dict | None = None) -> dict:
+    """Map the real backend payload (nested result/latest + vehicles/speed/helmet) for the UI."""
+    status = status or {}
+    result = _as_dict(status.get("result"))
+    latest = live or _as_dict(status.get("latest")) or _as_dict(result.get("latest"))
+
+    vehicles = (
+        _as_dict(status.get("vehicles"))
+        or _as_dict(result.get("vehicles"))
+        or _as_dict(latest.get("vehicles"))
+        or _as_dict(latest.get("vehicle_counts"))
+    )
+
+    speed = _as_dict(status.get("speed")) or _as_dict(result.get("speed")) or _as_dict(latest.get("speed"))
+    congestion = _as_dict(latest.get("congestion"))
+    if not speed and congestion:
+        speed = {
+            "current": congestion.get("avg_speed"),
+            "average": congestion.get("avg_speed"),
+            "max": None,
+            "violations": 0,
+            "per_vehicle": [],
+        }
+
+    helmet = _as_dict(status.get("helmet")) or _as_dict(result.get("helmet")) or _as_dict(latest.get("helmet"))
+
+    violation_counts = (
+        _as_dict(status.get("violation_counts"))
+        or _as_dict(result.get("violation_counts"))
+        or _as_dict(latest.get("violation_counts"))
+    )
+    raw_violations = latest.get("violations")
+    events = _as_list(status.get("violation_events")) or _as_list(result.get("violation_events")) or _as_list(
+        latest.get("violation_events")
+    )
+    if isinstance(raw_violations, dict) and not violation_counts:
+        violation_counts = raw_violations
+    elif isinstance(raw_violations, list):
+        events = events or raw_violations
+
+    if not violation_counts and events:
+        counts = {}
+        for item in events:
+            if isinstance(item, dict):
+                key = item.get("type") or "other"
+                counts[key] = counts.get(key, 0) + 1
+        violation_counts = counts
+
+    if not helmet and events:
+        no_helmet = violation_counts.get("no_helmet", 0)
+        helmet = {"riders_checked": None, "helmet": None, "no_helmet": no_helmet, "violations": no_helmet}
+
+    output_video_url = status.get("output_video_url") or result.get("output_video_url")
+    if not output_video_url and status.get("session_id"):
+        if status.get("status") == "completed" or result.get("output_video") or latest.get("output_video"):
+            output_video_url = f"/api/v1/video/output/{status['session_id']}"
+
+    return {
+        "status": status.get("status") or latest.get("status"),
+        "error": status.get("error"),
+        "session_id": status.get("session_id") or latest.get("session_id"),
+        "progress": latest.get("progress"),
+        "processed_frames": latest.get("processed_frames") or status.get("processed_frames") or result.get("processed_frames"),
+        "total_frames": latest.get("total_frames"),
+        "vehicles": vehicles,
+        "vehicle_counts": _as_dict(latest.get("vehicle_counts")) or vehicles,
+        "speed": speed,
+        "helmet": helmet,
+        "congestion": congestion,
+        "violations": events,
+        "violation_counts": violation_counts,
+        "alerts": _as_list(latest.get("alerts")),
+        "forecast": latest.get("forecast"),
+        "signal_recommendation": latest.get("signal_recommendation"),
+        "entry_exit": _as_dict(latest.get("entry_exit")),
+        "flow": _as_dict(latest.get("flow")),
+        "output_video_url": output_video_url,
+        "peak_congestion": status.get("peak_congestion") or result.get("peak_congestion"),
+    }
+
+
+def _vehicle_label(key: str) -> str:
+    labels = {
+        "total": "Total",
+        "cars": "Car",
+        "car": "Car",
+        "bikes": "Bike",
+        "bike": "Bike",
+        "autos": "Auto",
+        "auto": "Auto",
+        "trucks": "Truck",
+        "truck": "Truck",
+        "buses": "Bus",
+        "bus": "Bus",
+        "motorcycles": "Bike",
+        "motorcycle": "Bike",
+    }
+    return labels.get(key, key.replace("_", " ").title())
+
+
+def render_detection_dashboard(data: dict, session_id: str):
+    vehicles = _as_dict(data.get("vehicles")) or _as_dict(data.get("vehicle_counts"))
+    class_keys = [k for k in vehicles.keys() if k != "total"]
+    total = vehicles.get("total")
+    if total is None:
+        total = sum(int(vehicles.get(k) or 0) for k in class_keys)
+
+    st.subheader("🚗 Vehicles")
+    cols = st.columns(min(max(len(class_keys) + 1, 1), 6))
+    cols[0].metric("Total", int(total or 0))
+    for i, key in enumerate(class_keys):
+        cols[(i + 1) % len(cols)].metric(_vehicle_label(key), int(vehicles.get(key) or 0))
+
+    if class_keys:
+        chart_df = pd.DataFrame(
+            {"Type": [_vehicle_label(k) for k in class_keys], "Count": [int(vehicles.get(k) or 0) for k in class_keys]}
+        )
+        fig = px.pie(chart_df, values="Count", names="Type", color_discrete_sequence=px.colors.qualitative.Set2)
+        fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#21262d", font_color="#c9d1d9")
+        st.plotly_chart(fig, use_container_width=True)
+
+    speed = _as_dict(data.get("speed"))
+    st.subheader("🏎️ Speed")
+    s1, s2, s3, s4 = st.columns(4)
+    def _spd(val):
+        return "—" if val is None else f"{float(val):.1f} km/h"
+
+    s1.metric("Current", _spd(speed.get("current")))
+    s2.metric("Average", _spd(speed.get("average")))
+    s3.metric("Max", _spd(speed.get("max")))
+    s4.metric("Speed violations", int(speed.get("violations") or 0))
+    per_vehicle = _as_list(speed.get("per_vehicle"))
+    if per_vehicle:
+        st.caption("Per-vehicle speed (latest frame)")
+        st.dataframe(pd.DataFrame(per_vehicle), use_container_width=True, hide_index=True)
+
+    helmet = _as_dict(data.get("helmet"))
+    st.subheader("🪖 Helmet")
+    h1, h2, h3, h4 = st.columns(4)
+    def _n(val):
+        return "—" if val is None else int(val)
+
+    h1.metric("Riders checked", _n(helmet.get("riders_checked")))
+    h2.metric("Helmet", _n(helmet.get("helmet")))
+    h3.metric("No helmet", _n(helmet.get("no_helmet")))
+    h4.metric("Helmet violations", _n(helmet.get("violations") if helmet.get("violations") is not None else helmet.get("no_helmet")))
+
+    st.subheader("⚠️ Violations")
+    vcounts = _as_dict(data.get("violation_counts"))
+    events = _as_list(data.get("violations"))
+    if vcounts:
+        vcols = st.columns(min(len(vcounts), 4) or 1)
+        for i, (vtype, count) in enumerate(vcounts.items()):
+            vcols[i % len(vcols)].metric(_vehicle_label(vtype), int(count or 0))
+    elif not events:
+        st.info("No violations reported for this session yet.")
+    for v in events[:30]:
+        if not isinstance(v, dict):
+            continue
+        st.markdown(
+            f'<div class="alert-box">{str(v.get("type", "")).upper()}: {v.get("details", "")}</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.subheader("Processed video")
+    frame_url = f"{API_URL}/video/frame/{session_id}?t={int(time.time())}"
+    try:
+        img_r = requests.get(frame_url, timeout=8)
+        if img_r.status_code == 200:
+            st.image(Image.open(io.BytesIO(img_r.content)), caption="Latest processed frame", use_container_width=True)
         else:
-            r = requests.post(f"{API_URL}{path}", json=json, timeout=60)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        st.error(f"API Error: {e}")
-        return None
+            st.caption("Latest processed frame not available yet.")
+    except Exception:
+        st.caption("Waiting for processed frames...")
+
+    video_path = data.get("output_video_url")
+    if video_path:
+        video_url = video_path if str(video_path).startswith("http") else f"{API_ORIGIN}{video_path}"
+        try:
+            vid_r = requests.get(video_url, timeout=30)
+            if vid_r.status_code == 200 and vid_r.content:
+                st.video(vid_r.content)
+            elif vid_r.status_code == 404:
+                st.caption("Processed video file is not ready yet.")
+            else:
+                st.warning(f"Could not load processed video (HTTP {vid_r.status_code}).")
+        except Exception as e:
+            st.warning(f"Could not load processed video: {_http_error_message(e)}")
 
 
 def congestion_class(level: str) -> str:
@@ -123,63 +353,41 @@ if page == "Live Dashboard":
     if session_id:
         st.session_state.session_id = session_id
         status = api_get(f"/video/status/{session_id}")
-        live = api_get(f"/analytics/live/{session_id}") if status and status.get("latest") else None
+        live = None
+        if status and (status.get("latest") or status.get("status") == "processing"):
+            live = api_get(f"/analytics/live/{session_id}", show_error=False)
 
         if status:
             st.info(f"Status: **{status.get('status', 'unknown')}**")
+            if status.get("status") == "failed":
+                st.error(f"Processing failed: {status.get('error') or 'unknown error'}")
 
-        data = live or (status.get("latest") if status else None)
-        if data:
+        data = normalize_results(status, live)
+        if status and (data.get("vehicles") or data.get("congestion") or data.get("helmet") or live):
             c1, c2, c3, c4, c5 = st.columns(5)
-            counts = data.get("vehicle_counts", {})
-            cong = data.get("congestion", {})
+            counts = data.get("vehicle_counts") or data.get("vehicles") or {}
+            cong = data.get("congestion") or {}
             level = cong.get("level", "Low Traffic")
 
             c1.metric("Total Vehicles", counts.get("total", 0))
-            c2.metric("Cars", counts.get("cars", 0))
-            c3.metric("Bikes", counts.get("bikes", 0))
-            c4.metric("Buses", counts.get("buses", 0))
-            c5.metric("Autos", counts.get("autos", 0))
+            c2.metric("Cars", counts.get("cars", counts.get("car", 0)))
+            c3.metric("Bikes", counts.get("bikes", counts.get("bike", 0)))
+            c4.metric("Buses", counts.get("buses", counts.get("bus", 0)))
+            c5.metric("Autos", counts.get("autos", counts.get("auto", 0)))
 
             st.markdown(
                 f'<p class="{congestion_class(level)}">Congestion: {level} — Score: {cong.get("score", 0):.2f}</p>',
                 unsafe_allow_html=True,
             )
 
+            speed = data.get("speed") or {}
             m1, m2, m3 = st.columns(3)
-            m1.metric("Avg Speed", f"{cong.get('avg_speed', 0):.1f} km/h")
+            avg = speed.get("average") if speed.get("average") is not None else cong.get("avg_speed", 0)
+            m1.metric("Avg Speed", f"{float(avg or 0):.1f} km/h")
             m2.metric("Density", f"{cong.get('density', 0):.3f}")
             m3.metric("Occupancy", f"{cong.get('occupancy', 0):.3f}")
 
-            # Live frame
-            frame_col, chart_col = st.columns([1.2, 1])
-            with frame_col:
-                st.subheader("Live Processed Feed")
-                try:
-                    frame_url = f"{API_URL}/video/frame/{session_id}?t={int(time.time())}"
-                    img_r = requests.get(frame_url, timeout=5)
-                    if img_r.status_code == 200:
-                        st.image(Image.open(io.BytesIO(img_r.content)), use_container_width=True)
-                except Exception:
-                    st.warning("Waiting for processed frames...")
-
-            with chart_col:
-                st.subheader("Vehicle Distribution")
-                df = pd.DataFrame(
-                    {
-                        "Type": ["Cars", "Bikes", "Buses", "Trucks", "Autos"],
-                        "Count": [
-                            counts.get("cars", 0),
-                            counts.get("bikes", 0),
-                            counts.get("buses", 0),
-                            counts.get("trucks", 0),
-                            counts.get("autos", 0),
-                        ],
-                    }
-                )
-                fig = px.pie(df, values="Count", names="Type", color_discrete_sequence=px.colors.qualitative.Set2)
-                fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#21262d", font_color="#c9d1d9")
-                st.plotly_chart(fig, use_container_width=True)
+            render_detection_dashboard(data, session_id)
 
             # Congestion gauge
             st.subheader("Congestion Score")
@@ -214,30 +422,21 @@ if page == "Live Dashboard":
                 if data.get("signal_recommendation"):
                     st.success(f"🚥 Signal Recommendation: {data['signal_recommendation']}")
 
-            # Violations & Alerts
             v1, v2 = st.columns(2)
             with v1:
-                st.subheader("⚠️ Violations")
-                for v in data.get("violations", []):
-                    st.markdown(
-                        f'<div class="alert-box">{v.get("type", "").upper()}: {v.get("details", "")}</div>',
-                        unsafe_allow_html=True,
-                    )
-            with v2:
                 st.subheader("🔔 Alerts")
                 for a in data.get("alerts", []):
                     st.warning(f"[{a.get('severity', '')}] {a.get('message', '')}")
+            with v2:
+                st.subheader("Movement Analysis")
+                ee = data.get("entry_exit") or {}
+                flow = data.get("flow") or {}
+                f1, f2 = st.columns(2)
+                f1.metric("Entries", ee.get("entry", 0))
+                f2.metric("Exits", ee.get("exit", 0))
+                if flow:
+                    st.json(flow)
 
-            # Entry/Exit & Flow
-            ee = data.get("entry_exit", {})
-            flow = data.get("flow", {})
-            st.subheader("Movement Analysis")
-            f1, f2, f3 = st.columns(3)
-            f1.metric("Entries", ee.get("entry", 0))
-            f2.metric("Exits", ee.get("exit", 0))
-            f3.json(flow)
-
-            # Auto-refresh
             if status and status.get("status") == "processing":
                 time.sleep(2)
                 st.rerun()
@@ -257,25 +456,29 @@ elif page == "Video Processing":
         max_frames = st.number_input("Max frames (0 = all)", min_value=0, value=150)
 
         if uploaded and st.button("🚀 Start Processing", type="primary"):
-            with st.spinner("Uploading and processing..."):
-                files = {"file": (uploaded.name, uploaded.getvalue(), uploaded.type)}
-                params = {"frame_skip": frame_skip, "save_output": True}
-                if max_frames > 0:
-                    params["max_frames"] = int(max_frames)
-                try:
-                    r = requests.post(
-                        f"{API_URL}/video/upload",
-                        files=files,
-                        params=params,
-                        timeout=120,
-                    )
-                    r.raise_for_status()
-                    result = r.json()
-                    st.session_state.session_id = result["session_id"]
-                    st.success(f"Processing started! Session: **{result['session_id']}**")
-                    st.code(result["session_id"])
-                except Exception as e:
-                    st.error(str(e))
+            progress = st.empty()
+            progress.info("Uploading video to backend…")
+            files = {"file": (uploaded.name, uploaded.getvalue(), uploaded.type or "video/mp4")}
+            params = {"frame_skip": frame_skip, "save_output": True}
+            if max_frames > 0:
+                params["max_frames"] = int(max_frames)
+            try:
+                r = requests.post(
+                    f"{API_URL}/video/upload",
+                    files=files,
+                    params=params,
+                    timeout=180,
+                )
+                if not r.ok:
+                    raise requests.HTTPError(response=r)
+                result = r.json()
+                st.session_state.session_id = result["session_id"]
+                st.success(f"Upload accepted. Session: **{result['session_id']}**")
+                st.code(result["session_id"])
+                st.session_state.await_processing = True
+            except Exception as e:
+                st.error(_http_error_message(e))
+                st.session_state.await_processing = False
 
     with tab2:
         st.markdown("Generate and process synthetic Bengaluru traffic video for demo.")
@@ -285,15 +488,15 @@ elif page == "Video Processing":
                 gen = api_post("/video/sample/generate", json=None)
                 if gen:
                     st.info(f"Sample: {gen.get('path')}")
-                proc = requests.post(
-                    f"{API_URL}/video/sample/process",
+                proc = api_post(
+                    "/video/sample/process",
                     params={"duration_sec": duration, "frame_skip": 2, "max_frames": 150},
                     timeout=60,
                 )
-                if proc.ok:
-                    result = proc.json()
-                    st.session_state.session_id = result["session_id"]
-                    st.success(f"Session: {result['session_id']}")
+                if proc:
+                    st.session_state.session_id = proc["session_id"]
+                    st.success(f"Session: {proc['session_id']}")
+                    st.session_state.await_processing = True
 
     with tab3:
         st.markdown(
@@ -307,6 +510,23 @@ elif page == "Video Processing":
 
     if st.session_state.session_id:
         st.markdown(f"**Active Session:** `{st.session_state.session_id}`")
+        sid = st.session_state.session_id
+        status = api_get(f"/video/status/{sid}", timeout=20)
+        if status:
+            st.info(f"Status: **{status.get('status', 'unknown')}**")
+            if status.get("status") == "failed":
+                st.error(f"Processing failed: {status.get('error') or 'unknown error'}")
+            elif status.get("status") == "processing":
+                latest = status.get("latest") or {}
+                pct = float(latest.get("progress") or 0) * 100
+                st.progress(min(max(pct / 100.0, 0.0), 1.0), text=f"Processing video… {pct:.0f}%")
+                st.caption("YOLO inference can take several minutes on CPU (including Render). Keep this page open.")
+                time.sleep(2)
+                st.rerun()
+            elif status.get("status") == "completed":
+                live = api_get(f"/analytics/live/{sid}", show_error=False)
+                data = normalize_results(status, live)
+                render_detection_dashboard(data, sid)
 
 # ANALYTICS
 elif page == "Analytics":
