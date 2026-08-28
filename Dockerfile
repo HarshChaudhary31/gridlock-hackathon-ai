@@ -19,12 +19,13 @@ RUN pip install --no-cache-dir \
 
 COPY . .
 
-RUN mkdir -p uploads outputs reports weights logs data/sample
+RUN mkdir -p /app/weights /app/uploads /app/outputs /app/reports /app/logs /app/data
 
 ENV PYTHONPATH=/app
 ENV DEVICE=cpu
 ENV YOLO_CONFIG_DIR=/tmp/Ultralytics
 
-EXPOSE 8000 8501
+RUN python -c "from ultralytics import YOLO; import shutil; YOLO('yolov8n.pt'); shutil.copy('yolov8n.pt', '/app/weights/yolov8n.pt')"
+EXPOSE 8000
 
 CMD ["sh", "-c", "python main.py backend --host 0.0.0.0 --api-port ${PORT:-8000}"]
