@@ -11,8 +11,15 @@ router = APIRouter(tags=["health"])
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
     detector = get_detector()
+
+    try:
+        detector.load()
+        models_loaded = detector.is_loaded
+    except Exception:
+        models_loaded = False
+
     return HealthResponse(
-        status="healthy",
-        models_loaded=detector.is_loaded,
+        status="healthy" if models_loaded else "degraded",
+        models_loaded=models_loaded,
         database="connected",
     )
