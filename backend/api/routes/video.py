@@ -73,8 +73,12 @@ async def upload_video(
 
     session_id = str(uuid.uuid4())[:12]
     dest = settings.UPLOAD_DIR / f"{session_id}{ext}"
-    content = await file.read()
-    dest.write_bytes(content)
+    with dest.open("wb") as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
 
     _processing_tasks[session_id] = {"status": "processing"}
     background_tasks.add_task(
@@ -168,14 +172,51 @@ async def get_status(session_id: str):
 
     if task:
         resp = {"session_id": session_id, **task}
+        result = task.get("result") if isinstance(task, dict) else None
         if live and live.get("latest"):
             resp["latest"] = live["latest"]
+        elif isinstance(result, dict) and result.get("latest"):
+            resp["latest"] = result["latest"]
+        if isinstance(result, dict):
+            for key in (
+                "vehicles",
+                "speed",
+                "helmet",
+                "violation_counts",
+                "violation_events",
+                "output_video",
+                "processed_frames",
+                "peak_congestion",
+            ):
+                if key in result and key not in resp:
+                    resp[key] = result[key]
+        output_path = settings.OUTPUT_DIR / f"processed_{session_id}.mp4"
+        if output_path.exists():
+            resp["output_video_url"] = f"/api/v1/video/output/{session_id}"
         return resp
 
     if live:
-        return {"session_id": session_id, "status": live.get("status", "unknown"), "latest": live.get("latest")}
+        resp = {
+            "session_id": session_id,
+            "status": live.get("status", "unknown"),
+            "latest": live.get("latest"),
+        }
+        output_path = settings.OUTPUT_DIR / f"processed_{session_id}.mp4"
+        if output_path.exists():
+            resp["output_video_url"] = f"/api/v1/video/output/{session_id}"
+        return resp
 
     raise HTTPException(404, "Session not found")
+
+
+@router.get("/output/{session_id}")
+async def get_processed_video(session_id: str):
+    path = settings.OUTPUT_DIR / f"processed_{session_id}.mp4"
+    if not path.exists():
+        raise HTTPException(404, "Processed video not available yet")
+    from fastapi.responses import FileResponse
+
+    return FileResponse(str(path), media_type="video/mp4", filename=path.name)
 
 
 @router.get("/frame/{session_id}")

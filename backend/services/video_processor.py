@@ -38,6 +38,7 @@ class VideoProcessor:
         self.analytics_service = AnalyticsService()
         self._sessions: Dict[str, Dict] = {}
         self._peak_congestion: Dict[str, str] = {}
+        self._session_accum: Dict[str, Dict[str, Any]] = {}
 
     def _count_vehicles(self, detections: List[Dict]) -> VehicleCounts:
         counts = defaultdict(int)
@@ -54,6 +55,141 @@ class VideoProcessor:
             trucks=counts.get("truck", 0),
             autos=counts.get("auto", 0),
         )
+
+    def _counts_payload(self, detections: List[Dict], counts: VehicleCounts) -> Dict[str, int]:
+        dumped = counts.model_dump()
+        extra = defaultdict(int)
+        for d in detections:
+            name = d["class_name"]
+            if name not in {"car", "bike", "bus", "truck", "auto", "person"}:
+                extra[name] += 1
+        dumped.update(extra)
+        return dumped
+
+    def _init_accum(self, session_id: str) -> Dict[str, Any]:
+        accum = {
+            "unique_vehicles": defaultdict(set),
+            "speeds": [],
+            "max_speed": None,
+            "helmet_ids": set(),
+            "no_helmet_ids": set(),
+            "rider_ids": set(),
+            "violation_keys": set(),
+            "violation_counts": defaultdict(int),
+            "violation_events": [],
+            "overspeed_ids": set(),
+        }
+        self._session_accum[session_id] = accum
+        return accum
+
+    def _build_session_stats(
+        self,
+        accum: Dict[str, Any],
+        current_avg_speed: float,
+        current_counts: Dict[str, int],
+        per_vehicle_speed: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        unique = accum["unique_vehicles"]
+        vehicles: Dict[str, int] = {}
+        for cls_name, ids in unique.items():
+            key = {"car": "cars", "bike": "bikes", "bus": "buses", "truck": "trucks", "auto": "autos"}.get(
+                cls_name, cls_name
+            )
+            vehicles[key] = len(ids)
+        vehicles["total"] = sum(len(ids) for ids in unique.values())
+        if vehicles["total"] == 0:
+            vehicles = dict(current_counts)
+
+        speeds = accum["speeds"]
+        avg_speed = float(np.mean(speeds)) if speeds else current_avg_speed
+        max_speed = accum["max_speed"]
+        helmet_n = len(accum["helmet_ids"])
+        no_helmet_n = len(accum["no_helmet_ids"])
+        riders = len(accum["rider_ids"]) or (helmet_n + no_helmet_n)
+
+        return {
+            "vehicles": vehicles,
+            "speed": {
+                "current": current_avg_speed,
+                "average": round(avg_speed, 2) if avg_speed is not None else None,
+                "max": round(max_speed, 2) if max_speed is not None else None,
+                "violations": len(accum["overspeed_ids"]),
+                "per_vehicle": per_vehicle_speed,
+            },
+            "helmet": {
+                "riders_checked": riders,
+                "helmet": helmet_n,
+                "no_helmet": no_helmet_n,
+                "violations": no_helmet_n,
+            },
+            "violation_counts": dict(accum["violation_counts"]),
+            "violation_events": accum["violation_events"][-50:],
+        }
+
+    def _update_accum(
+        self,
+        accum: Dict[str, Any],
+        detections: List[Dict],
+        violations: List[Dict],
+        helmet_stats: Dict[str, Any],
+        speed_limit: float,
+    ) -> List[Dict[str, Any]]:
+        per_vehicle_speed: List[Dict[str, Any]] = []
+        for d in detections:
+            if d["class_name"] == "person":
+                continue
+            tid = d.get("track_id")
+            if tid is not None:
+                accum["unique_vehicles"][d["class_name"]].add(tid)
+            sp = d.get("speed_kmh")
+            if sp is not None:
+                accum["speeds"].append(sp)
+                if accum["max_speed"] is None or sp > accum["max_speed"]:
+                    accum["max_speed"] = sp
+                per_vehicle_speed.append(
+                    {
+                        "track_id": tid,
+                        "class_name": d["class_name"],
+                        "speed_kmh": round(float(sp), 2),
+                    }
+                )
+                if tid is not None and sp > speed_limit:
+                    accum["overspeed_ids"].add(tid)
+                    key = ("overspeeding", tid)
+                    if key not in accum["violation_keys"]:
+                        accum["violation_keys"].add(key)
+                        accum["violation_counts"]["overspeeding"] += 1
+                        accum["violation_events"].append(
+                            {
+                                "type": "overspeeding",
+                                "track_id": tid,
+                                "confidence": 0.8,
+                                "bbox": d["bbox"],
+                                "details": f"Speed {sp:.1f} km/h exceeds {speed_limit:.0f} km/h",
+                                "speed_kmh": round(float(sp), 2),
+                            }
+                        )
+
+        for tid in helmet_stats.get("helmet_track_ids") or []:
+            accum["helmet_ids"].add(tid)
+            accum["rider_ids"].add(tid)
+            accum["no_helmet_ids"].discard(tid)
+        for tid in helmet_stats.get("no_helmet_track_ids") or []:
+            accum["no_helmet_ids"].add(tid)
+            accum["rider_ids"].add(tid)
+            accum["helmet_ids"].discard(tid)
+
+        for v in violations:
+            tid = v.get("track_id")
+            vtype = v.get("type", "unknown")
+            key = (vtype, tid)
+            if key in accum["violation_keys"]:
+                continue
+            accum["violation_keys"].add(key)
+            accum["violation_counts"][vtype] += 1
+            accum["violation_events"].append(v)
+
+        return per_vehicle_speed
 
     def _update_peak(self, session_id: str, level: CongestionLevel) -> None:
         order = ["Low Traffic", "Medium Traffic", "Heavy Traffic", "Gridlock"]
@@ -106,6 +242,8 @@ class VideoProcessor:
 
         self._sessions[session_id] = {"status": "processing", "latest": {}}
         self._peak_congestion[session_id] = "Low Traffic"
+        accum = self._init_accum(session_id)
+        speed_limit = settings.SPEED_LIMIT_KMH
 
         try:
             self.detector.load()
@@ -140,11 +278,32 @@ class VideoProcessor:
                     if motion["speed_kmh"] is not None:
                         speeds.append(motion["speed_kmh"])
 
-            violations = self.detector.detect_helmets(frame, bikes, persons)
+            violations, helmet_stats = self.detector.detect_helmets(frame, bikes, persons)
 
             counts = self._count_vehicles(detections)
+            counts_payload = self._counts_payload(detections, counts)
             congestion = self.congestion_analyzer.analyze(detections, frame.shape, speeds)
             self._update_peak(session_id, congestion["level"])
+            per_vehicle_speed = self._update_accum(
+                accum, detections, violations, helmet_stats, speed_limit
+            )
+            session_stats = self._build_session_stats(
+                accum, congestion["avg_speed"], counts_payload, per_vehicle_speed
+            )
+            for d in detections:
+                sp = d.get("speed_kmh")
+                if d["class_name"] == "person" or sp is None or sp <= speed_limit:
+                    continue
+                violations.append(
+                    {
+                        "type": "overspeeding",
+                        "track_id": d.get("track_id"),
+                        "confidence": 0.8,
+                        "bbox": d["bbox"],
+                        "details": f"Speed {sp:.1f} km/h exceeds {speed_limit:.0f} km/h",
+                        "speed_kmh": round(float(sp), 2),
+                    }
+                )
 
             anomalies = self.anomaly_detector.analyze(
                 counts.total,
@@ -174,7 +333,7 @@ class VideoProcessor:
                 frame,
                 detections,
                 congestion,
-                counts.model_dump(),
+                counts_payload,
                 violations,
                 session_id,
                 frame_number,
@@ -211,7 +370,12 @@ class VideoProcessor:
                 "processed_frames": processed,
                 "total_frames": total_frames,
                 "progress": min(frame_number / max(total_frames, 1), 1.0),
-                "vehicle_counts": counts.model_dump(),
+                "vehicle_counts": counts_payload,
+                "vehicles": session_stats["vehicles"],
+                "speed": session_stats["speed"],
+                "helmet": session_stats["helmet"],
+                "violation_counts": session_stats["violation_counts"],
+                "violation_events": session_stats["violation_events"],
                 "congestion": {
                     "level": congestion["level"].value if hasattr(congestion["level"], "value") else str(congestion["level"]),
                     "score": congestion["score"],
@@ -255,6 +419,24 @@ class VideoProcessor:
             )
 
         self._sessions[session_id]["status"] = "completed"
+        final_stats = self._build_session_stats(
+            accum,
+            latest_state.get("congestion", {}).get("avg_speed", 0.0) if latest_state else 0.0,
+            latest_state.get("vehicle_counts", {}) if latest_state else {},
+            latest_state.get("speed", {}).get("per_vehicle", []) if latest_state else [],
+        )
+        if latest_state:
+            latest_state.update(
+                {
+                    "vehicles": final_stats["vehicles"],
+                    "speed": final_stats["speed"],
+                    "helmet": final_stats["helmet"],
+                    "violation_counts": final_stats["violation_counts"],
+                    "violation_events": final_stats["violation_events"],
+                    "output_video": output_path,
+                }
+            )
+            self._sessions[session_id]["latest"] = latest_state
         return {
             "session_id": session_id,
             "status": "completed",
@@ -262,6 +444,11 @@ class VideoProcessor:
             "output_video": output_path,
             "peak_congestion": self._peak_congestion.get(session_id),
             "latest": latest_state,
+            "vehicles": final_stats["vehicles"],
+            "speed": final_stats["speed"],
+            "helmet": final_stats["helmet"],
+            "violation_counts": final_stats["violation_counts"],
+            "violation_events": final_stats["violation_events"],
         }
 
     def get_session_state(self, session_id: str) -> Optional[Dict]:

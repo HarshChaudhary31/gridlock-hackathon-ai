@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     MAX_FPS_PROCESS: int = 15
     HEATMAP_DECAY: float = 0.98
     TRACK_MAX_AGE: int = 30
+    SPEED_LIMIT_KMH: float = 60.0
 
     # Congestion thresholds (density score 0-1)
     CONGESTION_LOW: float = 0.25
