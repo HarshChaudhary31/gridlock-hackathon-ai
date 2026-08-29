@@ -275,8 +275,8 @@ class VideoProcessor:
             vehicles = [d for d in detections if d["class_name"] != "person"]
             bikes = [d for d in vehicles if d["class_name"] == "bike"]
 
-            speeds = []
-                        for det in detections:
+                        speeds = []
+            for det in detections:
                 if det.get("track_id") is not None and det["class_name"] != "person":
                     motion = self.track_state.update(
                         det["track_id"], det["bbox"], frame_number
@@ -285,7 +285,6 @@ class VideoProcessor:
                     det["direction"] = motion["direction"]
                     if motion["speed_kmh"] is not None:
                         speeds.append(motion["speed_kmh"])
-
             # Helmet detection is expensive, so run it every 3 processed frames
             if processed % 3 == 0 and bikes:
                 violations, helmet_stats = self.detector.detect_helmets(
