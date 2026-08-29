@@ -284,7 +284,14 @@ detections, _ = self.detector.detect(frame, track=True)
                     if motion["speed_kmh"] is not None:
                         speeds.append(motion["speed_kmh"])
 
-            violations, helmet_stats = self.detector.detect_helmets(frame, bikes, persons)
+         # Helmet detection is expensive, so run it every 3 processed frames
+if processed % 3 == 0 and bikes:
+    violations, helmet_stats = self.detector.detect_helmets(
+        frame, bikes, persons
+    )
+else:
+    violations = []
+    helmet_stats = {}
 
             counts = self._count_vehicles(detections)
             counts_payload = self._counts_payload(detections, counts)
