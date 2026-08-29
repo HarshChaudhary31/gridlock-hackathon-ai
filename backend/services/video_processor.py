@@ -263,18 +263,20 @@ class VideoProcessor:
                 break
 
             # Resize large frames for faster AI processing
-if frame.shape[1] > 640:
-    scale = 640 / frame.shape[1]
-    new_height = int(frame.shape[0] * scale)
-    frame = cv2.resize(frame, (640, new_height))
+            # Resize large frames for faster AI processing
+            if frame.shape[1] > 640:
+                scale = 640 / frame.shape[1]
+                new_height = int(frame.shape[0] * scale)
+                frame = cv2.resize(frame, (640, new_height))
 
-detections, _ = self.detector.detect(frame, track=True)
+            detections, _ = self.detector.detect(frame, track=True)
+
             persons = [d for d in detections if d["class_name"] == "person"]
             vehicles = [d for d in detections if d["class_name"] != "person"]
             bikes = [d for d in vehicles if d["class_name"] == "bike"]
 
             speeds = []
-            for det in detections:
+                        for det in detections:
                 if det.get("track_id") is not None and det["class_name"] != "person":
                     motion = self.track_state.update(
                         det["track_id"], det["bbox"], frame_number
@@ -284,14 +286,14 @@ detections, _ = self.detector.detect(frame, track=True)
                     if motion["speed_kmh"] is not None:
                         speeds.append(motion["speed_kmh"])
 
-         # Helmet detection is expensive, so run it every 3 processed frames
-if processed % 3 == 0 and bikes:
-    violations, helmet_stats = self.detector.detect_helmets(
-        frame, bikes, persons
-    )
-else:
-    violations = []
-    helmet_stats = {}
+            # Helmet detection is expensive, so run it every 3 processed frames
+            if processed % 3 == 0 and bikes:
+                violations, helmet_stats = self.detector.detect_helmets(
+                    frame, bikes, persons
+                )
+            else:
+                violations = []
+                helmet_stats = {}
 
             counts = self._count_vehicles(detections)
             counts_payload = self._counts_payload(detections, counts)
@@ -410,12 +412,13 @@ else:
 
             # Save latest frame for dashboard polling
             # Save dashboard preview only every 5 processed frames
-if processed % 5 == 0:
-    frame_path = settings.OUTPUT_DIR / f"latest_{session_id}.jpg"
-    cv2.imwrite(str(frame_path), heat_frame)
-    latest_state["output_frame_path"] = str(frame_path)
-else:
-    latest_state["output_frame_path"] = None
+            # Save dashboard preview only every 5 processed frames
+            if processed % 5 == 0:
+                frame_path = settings.OUTPUT_DIR / f"latest_{session_id}.jpg"
+                cv2.imwrite(str(frame_path), heat_frame)
+                latest_state["output_frame_path"] = str(frame_path)
+            else:
+                latest_state["output_frame_path"] = None
 
             self._sessions[session_id]["latest"] = latest_state
 
