@@ -203,7 +203,7 @@ class VideoProcessor:
         source_path: str,
         session_id: Optional[str] = None,
         save_output: bool = True,
-        frame_skip: int = 2,
+        frame_skip: int = 5,
         progress_callback: Optional[Callable[[Dict], None]] = None,
         db_session=None,
         max_frames: Optional[int] = None,
@@ -262,7 +262,13 @@ class VideoProcessor:
             if max_frames and processed >= max_frames:
                 break
 
-            detections, _ = self.detector.detect(frame, track=True)
+            # Resize large frames for faster AI processing
+if frame.shape[1] > 640:
+    scale = 640 / frame.shape[1]
+    new_height = int(frame.shape[0] * scale)
+    frame = cv2.resize(frame, (640, new_height))
+
+detections, _ = self.detector.detect(frame, track=True)
             persons = [d for d in detections if d["class_name"] == "person"]
             vehicles = [d for d in detections if d["class_name"] != "person"]
             bikes = [d for d in vehicles if d["class_name"] == "bike"]
