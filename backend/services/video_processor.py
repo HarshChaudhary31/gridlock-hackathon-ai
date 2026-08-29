@@ -409,9 +409,13 @@ else:
             }
 
             # Save latest frame for dashboard polling
-            frame_path = settings.OUTPUT_DIR / f"latest_{session_id}.jpg"
-            cv2.imwrite(str(frame_path), heat_frame)
-            latest_state["output_frame_path"] = str(frame_path)
+            # Save dashboard preview only every 5 processed frames
+if processed % 5 == 0:
+    frame_path = settings.OUTPUT_DIR / f"latest_{session_id}.jpg"
+    cv2.imwrite(str(frame_path), heat_frame)
+    latest_state["output_frame_path"] = str(frame_path)
+else:
+    latest_state["output_frame_path"] = None
 
             self._sessions[session_id]["latest"] = latest_state
 
